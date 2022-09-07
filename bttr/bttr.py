@@ -9,24 +9,6 @@ import warnings
 
 from .ace import optimize_tensor_decomposition
 
-r"""
-Requirements
-    numpy
-    scipy
-    tensorly
-
-    [warnings]
-    [pickle]
-"""
-
-r"""
-TODO
-Optimize ACE
-ACE Exception catching if all columns are pruned
-
-
-"""
-
 def fix_numpy_vector(vector):
     r"""
     Hack to properly encode 1D arrays in Python
