@@ -127,3 +127,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Don't upload any Visual Studio Code files
+.vscode/
+
+# DOn't upload these OSX files
+.DS_Store
