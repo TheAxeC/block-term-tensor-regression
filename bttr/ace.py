@@ -69,7 +69,7 @@ def update_G(full_tensor_C, components_P, snr):
         if err > epsilon:
             break
         else:
-            lambda_l = lambda_h
+            lambda_l = lambda_h # testing
             lambda_h = 2 * lambda_h
     
     # Optimal lambda should be between lambda_l and lambda_h
