@@ -69,7 +69,7 @@ def update_G(full_tensor_C, components_P, snr):
         if err > epsilon:
             break
         else:
-            lambda_l = lambda_h # testing
+            lambda_l = lambda_h
             lambda_h = 2 * lambda_h
     
     # Optimal lambda should be between lambda_l and lambda_h
@@ -108,8 +108,8 @@ def pruning(core_tensor_G, components_P, ratio):
         gm = tl.sum(tl.abs(Gm), 1)
         ids = [k for k in range(0, Gm.shape[0]) if ((1 - gm[k] / tl.sum(gm)) * 100) > ratio]
         inv_ids = [k for k in range(0, Gm.shape[0]) if k not in ids]
+        if len(inv_ids) == 0: inv_ids = ids # Added to resolve issue when all gets pruned
         RR[n] = len(inv_ids)
-
         Gm = Gm[inv_ids,:]
         components_P_out[n] = components_P[n][:,inv_ids]
         core_tensor_G = tl.fold(Gm, n, RR)
@@ -263,3 +263,4 @@ def optimize_tensor_decomposition(X, Y, full_tensor_C, core_tensor_G, components
     core_tensor, components = automatic_component_extraction(full_tensor_C, core_tensor_G, components_P, SNRs, ratios)
     if accos: core_tensor_G, components_P = automatic_correlated_component_selection(X, Y, core_tensor_G, components_P)
     return core_tensor, components
+    
