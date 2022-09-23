@@ -1,9 +1,16 @@
 import tensorly as tl
 import numpy as np
+from scipy.linalg import fractional_matrix_power
 
 r"""
 Functions for Automatic Parameter Estimation of BTTR
 """
+
+class PrunedAllComponents(Exception):
+    """
+    Used when all components are pruned and thus nothing can be reconstructed in the decomposition
+    """
+    pass
 
 def automatic_correlated_component_selection(X, Y, core_tensor_G, components_P):
     r"""
@@ -63,7 +70,7 @@ def update_G(full_tensor_C, components_P, snr):
         return core_tensor_G
     
     # Normally repeat until convergence, but put limit on it
-    for i in range(0, 100):
+    for i in range(0, 1000):
         core_tensor_G_h = tl.sign(core_tensor_G) * tl.clip((tl.abs(core_tensor_G) - lambda_h), 0)
         err = np.sum((full_tensor_C - tl.tucker_to_tensor((core_tensor_G_h, components_P))) ** 2)
         if err > epsilon:
@@ -108,12 +115,21 @@ def pruning(core_tensor_G, components_P, ratio):
         gm = tl.sum(tl.abs(Gm), 1)
         ids = [k for k in range(0, Gm.shape[0]) if ((1 - gm[k] / tl.sum(gm)) * 100) > ratio]
         inv_ids = [k for k in range(0, Gm.shape[0]) if k not in ids]
-        if len(inv_ids) == 0: inv_ids = ids # Added to resolve issue when all gets pruned
+        if len(inv_ids) == 0: raise PrunedAllComponents() # Added to resolve issue when all gets pruned
         RR[n] = len(inv_ids)
         Gm = Gm[inv_ids,:]
         components_P_out[n] = components_P[n][:,inv_ids]
         core_tensor_G = tl.fold(Gm, n, RR)
     return core_tensor_G, components_P_out
+
+def update_P(full_tensor_C, core_tensor_G, components_P):
+    N = len(components_P)
+    components_P_out = [None] * N
+    for n in range(0, N):
+        tmp_n = tl.unfold(tl.tucker_to_tensor((core_tensor_G, components_P), skip_factor=n), n)
+        components_P_out[n] = tl.unfold(full_tensor_C, n) @ tmp_n.T
+        components_P_out[n] = np.linalg.inv(fractional_matrix_power(components_P_out[n] @ components_P_out[n].T, 0.5)) @ components_P_out[n]
+    return components_P_out
 
 def modified_pstd(full_tensor_C, core_tensor_G, components_P, snr, ratio):
     r"""
@@ -161,8 +177,11 @@ def modified_pstd(full_tensor_C, core_tensor_G, components_P, snr, ratio):
         #         if P{n}(loc(ii),ii) < 0
         #             P{n}(:,ii) = P{n}(:,ii) * -1;
         # components_P = update_P(full_tensor_C, core_tensor_G, components_P)
-        core_tensor_G = update_G(full_tensor_C, components_P, snr)
-        core_tensor_G, components_P = pruning(core_tensor_G, components_P, ratio)
+        try:
+            core_tensor_G = update_G(full_tensor_C, components_P, snr)
+            core_tensor_G, components_P = pruning(core_tensor_G, components_P, ratio)
+        except PrunedAllComponents:
+            break
 
         obj2 = tl.sum(tl.abs(core_tensor_G)) / tl.prod(full_tensor_C.shape)
         if tl.abs(obj - obj2) < tol:
@@ -234,17 +253,23 @@ def automatic_component_extraction(full_tensor_C, core_tensor_G, components_P, S
     """
     core_tensor_G_out, components_P_out = None, None
     optimal_bic = None
+    ace_results = np.zeros((len(list(SNRs)), len(list(ratios))))
     optimal = ()
+    i,j = 0,0
     for snr in SNRs:
         for ratio in ratios:
             tmp_core_tensor_G, tmp_components_P = modified_pstd(full_tensor_C, core_tensor_G, components_P, snr, ratio)
             bic = calculateBIC(full_tensor_C, tmp_core_tensor_G, tmp_components_P)
             if not optimal_bic or bic < optimal_bic:
                 optimal_bic = bic
-                optimal = (snr, ratio)
+                optimal = (snr, ratio, bic)
                 core_tensor_G_out, components_P_out = tmp_core_tensor_G, tmp_components_P
+            ace_results[i][j] = bic
+            j += 1
+        i += 1
+        j = 0
     print(optimal)
-    return core_tensor_G_out, components_P_out
+    return core_tensor_G_out, components_P_out, ace_results
 
 def optimize_tensor_decomposition(X, Y, full_tensor_C, core_tensor_G, components_P, SNRs=range(1,50), ratios=np.arange(95,99.9, 0.1), accos=False):
     r"""
@@ -260,7 +285,7 @@ def optimize_tensor_decomposition(X, Y, full_tensor_C, core_tensor_G, components
         ratios (float/int list): list of parameters for use in pruning of the components
         accos (bool): Boolean to set whether ACCoS should be used
     """
-    core_tensor, components = automatic_component_extraction(full_tensor_C, core_tensor_G, components_P, SNRs, ratios)
+    core_tensor, components, ace_results = automatic_component_extraction(full_tensor_C, core_tensor_G, components_P, SNRs, ratios)
     if accos: core_tensor_G, components_P = automatic_correlated_component_selection(X, Y, core_tensor_G, components_P)
-    return core_tensor, components
+    return core_tensor, components, ace_results
     

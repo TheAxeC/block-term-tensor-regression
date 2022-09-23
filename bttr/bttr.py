@@ -18,35 +18,11 @@ def fix_numpy_vector(vector):
     """
     return vector[None].T if len(vector.shape) == 1 else vector
 
-class GraphBTTR:
-    def train(self, X : np.ndarray, Y : np.ndarray, nFactor : int, SNRs=range(40,50), ratios=np.arange(95,99.9, 1), useACCoS=False, use_deflate=(True, True), enforce_rank_1=False, score_vector_matrix=False):
-        self.E = BlockTermTensor(X)
-        self.F = BlockTermTensor(Y)
-
-        train_iteration(currentIter+1, nFactor, SNRs, ratios, useACCoS, use_deflate, enforce_rank_1, score_vector_matrix)
-    
-    def train_iteration(self, currentIter : int, nFactor : int, SNRs=range(40,50), ratios=np.arange(95,99.9, 1), useACCoS=False, use_deflate=(True, True), enforce_rank_1=False, score_vector_matrix=False):
-        if score_vector_matrix: enforce_rank_1 = True
-
-        tolerance = 1e-16
-
-        if currentIter >= nFactor: return
-        if self.E.norm() <= tolerance or self.F.norm() <= tolerance: return
-
-        decomp = Decomposition(self.E, self.F, enforce_rank_1)
-        decomp.optimize_tensor_decomposition(SNRs, ratios, useACCoS)
-        decomp.deflate(use_deflate, score_vector_matrix)
-
-        # Split into parts
-        # create new F
-        #   Choose the right elements from components to select the correct finger(s)
-        # 
-
-
-        train_iteration(currentIter+1, nFactor, SNRs, ratios, useACCoS, use_deflate, enforce_rank_1, score_vector_matrix)
-
-    def predict(self, Xtest):
-        return tl.unfold(Xtest, 0) @ (self.E.model(pseudo_inverse=True, transpose=True) @ self.F.model())
+class TensorIncorrectlyFormed(Exception):
+    """
+    Used when the tensor contains NaN or Inf values
+    """
+    pass
 
 class BTTR:
     r"""
@@ -103,17 +79,20 @@ class BTTR:
             enforce_rank_1 (bool): Set whether Rank-(L2, . . . , LN , K2, . . . , KM) decomposition (for general purpose) should be used or Rank-(L2, · · · , LN, 1) decomposition (for tensor-matrix or tensor-vector only) should be used
             score_vector_matrix (bool): Used to set whether the score vector should be created differently (as described in eBTTR paper, only tensor-matrix or tensor-vector)
         """
+        if (not np.all(np.isfinite(X))) or (not np.all(np.isfinite(Y))): raise TensorIncorrectlyFormed()
         if score_vector_matrix: enforce_rank_1 = True
 
-        self.E = BlockTermTensor(X)
+        self.E = BlockTermTensor(X, pseudo_inverse=True)
         self.F = BlockTermTensor(Y)
+        self.ace_results = []
 
         tolerance = 1e-16
 
         for f in range(0, nFactor):
             if self.E.norm() > tolerance and self.F.norm() > tolerance:
                 decomp = Decomposition(self.E, self.F, enforce_rank_1)
-                decomp.optimize_tensor_decomposition(SNRs, ratios, useACCoS)
+                res = decomp.optimize_tensor_decomposition(SNRs, ratios, useACCoS)
+                self.ace_results.append(res)
                 decomp.deflate(use_deflate, score_vector_matrix)
             else:
                 break
@@ -125,14 +104,14 @@ class BTTR:
         Args:
             Xtest (np.ndarray): Input tensor (as a multidimensional numpy array). If the tensor is only comprised of a single sample, the dimension needs to be 1 (sample) x ....
         """
-        return tl.unfold(Xtest, 0) @ (self.E.model(pseudo_inverse=True, transpose=True) @ self.F.model())
+        return tl.unfold(Xtest, 0) @ (self.E.model() @ self.F.model())
 
 class BlockTermTensor:
     r"""
     BlockTermTensor defines the basic block for a Tensor within Block-Term Tensor Regression
     """
     
-    def __init__(self, tensor):
+    def __init__(self, tensor, pseudo_inverse=False):
         r"""
         BlockTermTensor defines the basic block for a Tensor within Block-Term Tensor Regression
 
@@ -140,8 +119,9 @@ class BlockTermTensor:
             tensor (np.ndarray): Tensor to encapsulate within the BlockTermTensor
         """
         self.tensor = fix_numpy_vector(tensor)
-        self.core_tensors = []
-        self.components = []
+        self.function = lambda x: np.linalg.pinv(x).T if pseudo_inverse else x
+        self.transpose = pseudo_inverse
+        self.models = []
 
     def deflate(self, score_vector_t, components, deflate=True):
         r"""
@@ -154,15 +134,16 @@ class BlockTermTensor:
         """
         core_tensor = tl.tucker_to_tensor((self.tensor, [score_vector_t] + components), transpose_factors=True)
         if deflate: self.tensor = self.tensor - tl.tucker_to_tensor((core_tensor, [score_vector_t] + components))
-        self.core_tensors.append(core_tensor)
-        self.components.append(components)
+        """ Precompute the 'model' used to predict in the predict function """
+        self.models.append(tenalg.kronecker(components) @ self.function(fix_numpy_vector(tl.tensor_to_vec(core_tensor))))
 
-    def model(self, pseudo_inverse=False, transpose=False):
-        W = [None] * len(self.core_tensors)
-        for f in range(0, len(self.core_tensors)):
-            W[f] = tenalg.kronecker(self.components[f]) 
-            if pseudo_inverse: W[f] = W[f] @ np.linalg.pinv(fix_numpy_vector(tl.tensor_to_vec(self.core_tensors[f]))).T
-            else: W[f] = W[f] @ fix_numpy_vector(tl.tensor_to_vec(self.core_tensors[f]))
+    def model(self):
+        r"""
+        Return the prediction matrix
+        """
+        W = [None] * len(self.models)
+        for f in range(0, len(self.models)):
+            W[f] = self.models[f]
             """
                 In the Matlab code the following is used
                 This forms the exact same result
@@ -174,7 +155,7 @@ class BlockTermTensor:
             # W[f] = tmp_1 @ np.linalg.inv(tmp_2 @ tmp_1)
         W = tl.tensor(W)
         W = W.reshape(W.shape[:-1])
-        if transpose: W = W.T
+        if self.transpose: W = W.T
         return W
     
     def norm(self):
@@ -236,7 +217,8 @@ class Decomposition:
             ratios (float/int list): list of parameters for use in pruning of the components
             useACCoS (bool): Used to select whether or not ACCoS should be used 
         """
-        self.core_tensor_G, self.components = optimize_tensor_decomposition(self.X, self.Y, self.full_tensor_C, self.core_tensor_G, self.components, SNRs, ratios, useACCoS)
+        self.core_tensor_G, self.components, ace_results = optimize_tensor_decomposition(self.X, self.Y, self.full_tensor_C, self.core_tensor_G, self.components, SNRs, ratios, useACCoS)
+        return ace_results
 
     def deflate(self, deflate=(True, True), score_vector_matrix=False):
         r"""
