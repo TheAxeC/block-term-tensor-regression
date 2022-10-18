@@ -1,13 +1,12 @@
-import tensorly as tl
-import numpy as np
-import scipy
-
-from tensorly import decomposition
-from tensorly import tenalg
-
 import warnings
 
+import numpy as np
+import scipy
+import tensorly as tl
+from tensorly import decomposition, tenalg
+
 from .ace import optimize_tensor_decomposition
+
 
 def fix_numpy_vector(vector):
     r"""
@@ -18,18 +17,12 @@ def fix_numpy_vector(vector):
     """
     return vector[None].T if len(vector.shape) == 1 else vector
 
-class TensorIncorrectlyFormed(Exception):
-    """
-    Used when the tensor contains NaN or Inf values
-    """
-    pass
-
 class BTTR:
     r"""
     Block-Term Tensor Regression (BTTR)
     """
 
-    def train(self, X : np.ndarray, Y : np.ndarray, nFactor : int, SNRs=range(40,50), ratios=np.arange(95,99.9, 1), useACCoS=False, use_deflate=(True, True), enforce_rank_1=False, score_vector_matrix=False):
+    def train(self, X : np.ndarray, Y : np.ndarray, nFactor : int, SNRs=range(30,41), ratios=np.arange(95,99.9, 1), useACCoS=False, use_deflate=(True, True), enforce_rank_1=False, score_vector_matrix=False):
         r"""
         Block-Term Tensor Regression (BTTR)
 
@@ -79,11 +72,11 @@ class BTTR:
             enforce_rank_1 (bool): Set whether Rank-(L2, . . . , LN , K2, . . . , KM) decomposition (for general purpose) should be used or Rank-(L2, · · · , LN, 1) decomposition (for tensor-matrix or tensor-vector only) should be used
             score_vector_matrix (bool): Used to set whether the score vector should be created differently (as described in eBTTR paper, only tensor-matrix or tensor-vector)
         """
-        if (not np.all(np.isfinite(X))) or (not np.all(np.isfinite(Y))): raise TensorIncorrectlyFormed()
         if score_vector_matrix: enforce_rank_1 = True
 
-        self.E = BlockTermTensor(X, pseudo_inverse=True)
-        self.F = BlockTermTensor(Y)
+        self.E = BlockTermTensor(X, pseudo_inverse=True, score_vector_matrix=score_vector_matrix)
+        self.F = BlockTermTensor(Y, score_vector_matrix=score_vector_matrix)
+        self.nFactor = nFactor
         self.ace_results = []
 
         tolerance = 1e-16
@@ -104,14 +97,18 @@ class BTTR:
         Args:
             Xtest (np.ndarray): Input tensor (as a multidimensional numpy array). If the tensor is only comprised of a single sample, the dimension needs to be 1 (sample) x ....
         """
-        return tl.unfold(Xtest, 0) @ (self.E.model() @ self.F.model())
+        if not self.nFactor: return [None]
+        out = [None] * self.nFactor
+        for i in range(0, self.nFactor):
+            out[i] = Xtest.reshape((Xtest.shape[0], -1), order='F') @ (self.E.model(i+1) @ self.F.model(i+1))
+        return out
 
 class BlockTermTensor:
     r"""
     BlockTermTensor defines the basic block for a Tensor within Block-Term Tensor Regression
     """
     
-    def __init__(self, tensor, pseudo_inverse=False):
+    def __init__(self, tensor, pseudo_inverse=False, score_vector_matrix=False):
         r"""
         BlockTermTensor defines the basic block for a Tensor within Block-Term Tensor Regression
 
@@ -121,9 +118,10 @@ class BlockTermTensor:
         self.tensor = fix_numpy_vector(tensor)
         self.function = lambda x: np.linalg.pinv(x).T if pseudo_inverse else x
         self.transpose = pseudo_inverse
+        self.score_vector_matrix = score_vector_matrix
         self.models = []
 
-    def deflate(self, score_vector_t, components, deflate=True):
+    def deflate(self, score_vector_t, components, deflate=True, core_tensor_G=None):
         r"""
         Deflate function
 
@@ -135,25 +133,26 @@ class BlockTermTensor:
         core_tensor = tl.tucker_to_tensor((self.tensor, [score_vector_t] + components), transpose_factors=True)
         if deflate: self.tensor = self.tensor - tl.tucker_to_tensor((core_tensor, [score_vector_t] + components))
         """ Precompute the 'model' used to predict in the predict function """
-        self.models.append(tenalg.kronecker(components) @ self.function(fix_numpy_vector(tl.tensor_to_vec(core_tensor))))
-
-    def model(self):
-        r"""
-        Return the prediction matrix
-        """
-        W = [None] * len(self.models)
-        for f in range(0, len(self.models)):
-            W[f] = self.models[f]
+        if (not self.score_vector_matrix) or (core_tensor_G is None): 
+            self.models.append(tenalg.kronecker(components, reverse=True) @ self.function(fix_numpy_vector(core_tensor.reshape((-1), order='F'))))  # type: ignore
+        else:
             """
                 In the Matlab code the following is used
                 This forms the exact same result
                 This doesn't follow the math as set up in the HOPLS paper 
                 [Higher-Order Partial Least Squares (HOPLS): A Generalized Multi-Linear Regression Method]
+                Only works for rank_1 decomposition (hence the self.score_vector_matrix check)
             """
-            # tmp_1 = (tenalg.kronecker(self.components_Ps[f]) @ tl.tensor_to_vec(self.core_tensors[f]))[None].T
-            # tmp_2 = tl.unfold(self.core_tensors[f], 0) @ tenalg.kronecker(self.components_Ps[f]).T
-            # W[f] = tmp_1 @ np.linalg.inv(tmp_2 @ tmp_1)
-        W = tl.tensor(W)
+            wpls = tenalg.kronecker(components, reverse=True) @ fix_numpy_vector(core_tensor_G.reshape((-1), order='F')) # type: ignore
+            ppls = np.linalg.inv((core_tensor.reshape((-1), order='F') @ fix_numpy_vector(core_tensor_G.reshape((-1), order='F')))[None]) # type: ignore
+            self.models.append(wpls @ ppls)
+
+    def model(self, factor=None):
+        r"""
+        Return the prediction matrix
+        """
+        if not factor: factor = len(self.models)
+        W = tl.tensor([self.models[f] for f in range(0, factor)])
         W = W.reshape(W.shape[:-1])
         if self.transpose: W = W.T
         return W
@@ -234,11 +233,10 @@ class Decomposition:
         """
         idx_p = len(self.X.tensor.shape) - 1
         if score_vector_matrix:
-            score_vector_t = tl.unfold(tl.tucker_to_tensor((self.X.tensor, [None] + self.components[:idx_p]), skip_factor=0, transpose_factors=True),0) @ np.linalg.pinv(fix_numpy_vector(tl.tensor_to_vec(self.core_tensor_G)).T)
+            score_vector_t = tl.unfold(tl.tucker_to_tensor((self.X.tensor, [None] + self.components[:idx_p]), skip_factor=0, transpose_factors=True),0) @ np.linalg.pinv(fix_numpy_vector(tl.tensor_to_vec(self.core_tensor_G)).T) # type: ignore
             score_vector_t = fix_numpy_vector(score_vector_t / np.linalg.norm(score_vector_t))
         else:
-            score_vector_t = fix_numpy_vector(scipy.linalg.svd(tl.unfold(tl.tucker_to_tensor((self.X.tensor, [None] + self.components[:idx_p]), skip_factor=0, transpose_factors=True),0))[0][:,0]) # compute svd, select left [0] matrix, select first singular vector
-        self.X.deflate(score_vector_t, self.components[:idx_p], deflate[0])
-        self.Y.deflate(score_vector_t, self.components[idx_p:], deflate[1])
-
-    
+            # compute svd, select left [0] matrix, select first singular vector 
+            score_vector_t = fix_numpy_vector(scipy.linalg.svd(tl.unfold(tl.tucker_to_tensor((self.X.tensor, [None] + self.components[:idx_p]), skip_factor=0, transpose_factors=True),0), full_matrices=False)[0][:,0]) # type: ignore
+        self.X.deflate(score_vector_t, self.components[:idx_p], deflate[0], self.core_tensor_G) # type: ignore
+        self.Y.deflate(score_vector_t, self.components[idx_p:], deflate[1]) # type: ignore

@@ -1,5 +1,5 @@
-import tensorly as tl
 import numpy as np
+import tensorly as tl
 from scipy.linalg import fractional_matrix_power
 
 r"""
@@ -12,7 +12,7 @@ class PrunedAllComponents(Exception):
     """
     pass
 
-def automatic_correlated_component_selection(X, Y, core_tensor_G, components_P):
+def automatic_correlated_component_selection(X, Y, full_tensor_C, core_tensor_G, components_P):
     r"""
     Once the core tensor :math:`\underline{\mathbf{G}}^{(c)}` and factors :math:`\{\mathbf{P}^{(n)}\}^N_{n=2}` are extracted via ACE, we select only the relevant components in a fully automatic manner as well. The full process consists of two steps: scoring (Step 1) and grouping (Step 2). In Step 1, for each n-mode factor, the single rth component is scored using the R-squared test between :math:`\mathbf{x}_r^{(n)}` and :math:`\mathbf{y}` where
 
@@ -39,7 +39,8 @@ def automatic_correlated_component_selection(X, Y, core_tensor_G, components_P):
         core_tensor_G (np.ndarray): Core tensor obtained from the tucker decomposition of full_tensor_C 
         components_P (np.ndarray): Factor matrices obtained from the tucker decomposition of full_tensor_C
     """
-    # TODO
+    N = X.shape
+
     return core_tensor_G, components_P
 
 def update_G(full_tensor_C, components_P, snr):
@@ -70,7 +71,7 @@ def update_G(full_tensor_C, components_P, snr):
         return core_tensor_G
     
     # Normally repeat until convergence, but put limit on it
-    for i in range(0, 1000):
+    for i in range(0, 100):
         core_tensor_G_h = tl.sign(core_tensor_G) * tl.clip((tl.abs(core_tensor_G) - lambda_h), 0)
         err = np.sum((full_tensor_C - tl.tucker_to_tensor((core_tensor_G_h, components_P))) ** 2)
         if err > epsilon:
@@ -91,6 +92,7 @@ def update_G(full_tensor_C, components_P, snr):
         
         if np.abs(lambda_h - lambda_l) < tolerance:
             break
+    
     core_tensor_G_l = tl.sign(core_tensor_G) * tl.clip((tl.abs(core_tensor_G) - lambda_l), 0)
     return core_tensor_G_l
 
@@ -113,6 +115,7 @@ def pruning(core_tensor_G, components_P, ratio):
     for n in range(0, N):
         Gm = tl.unfold(core_tensor_G, n)
         gm = tl.sum(tl.abs(Gm), 1)
+        test = [((1 - gm[k] / tl.sum(gm)) * 100) for k in range(0, Gm.shape[0])]
         ids = [k for k in range(0, Gm.shape[0]) if ((1 - gm[k] / tl.sum(gm)) * 100) > ratio]
         inv_ids = [k for k in range(0, Gm.shape[0]) if k not in ids]
         if len(inv_ids) == 0: raise PrunedAllComponents() # Added to resolve issue when all gets pruned
@@ -128,7 +131,7 @@ def update_P(full_tensor_C, core_tensor_G, components_P):
     for n in range(0, N):
         tmp_n = tl.unfold(tl.tucker_to_tensor((core_tensor_G, components_P), skip_factor=n), n)
         components_P_out[n] = tl.unfold(full_tensor_C, n) @ tmp_n.T
-        components_P_out[n] = np.linalg.inv(fractional_matrix_power(components_P_out[n] @ components_P_out[n].T, 0.5)) @ components_P_out[n]
+        components_P_out[n] = np.linalg.inv(fractional_matrix_power(components_P_out[n] @ components_P_out[n].T, 0.5)) @ components_P_out[n]  # type: ignore
     return components_P_out
 
 def modified_pstd(full_tensor_C, core_tensor_G, components_P, snr, ratio):
@@ -212,7 +215,8 @@ def calculateBIC(full_tensor_C, core_tensor_G, components_P):
     reconstructed = tl.tucker_to_tensor((core_tensor_G, components_P))
     df = np.count_nonzero(core_tensor_G)
     s = full_tensor_C.size
-    return np.log(tl.norm(full_tensor_C - reconstructed, 1) / s) + np.log(s)/s * df
+    xr = tl.sum((full_tensor_C - reconstructed)**2)
+    return np.log(xr / s) + np.log(s)/s * df
 
 def automatic_component_extraction(full_tensor_C, core_tensor_G, components_P, SNRs, ratios):
     r"""
@@ -260,7 +264,7 @@ def automatic_component_extraction(full_tensor_C, core_tensor_G, components_P, S
         for ratio in ratios:
             tmp_core_tensor_G, tmp_components_P = modified_pstd(full_tensor_C, core_tensor_G, components_P, snr, ratio)
             bic = calculateBIC(full_tensor_C, tmp_core_tensor_G, tmp_components_P)
-            if not optimal_bic or bic < optimal_bic:
+            if not optimal_bic or bic <= optimal_bic:
                 optimal_bic = bic
                 optimal = (snr, ratio, bic)
                 core_tensor_G_out, components_P_out = tmp_core_tensor_G, tmp_components_P
@@ -268,7 +272,7 @@ def automatic_component_extraction(full_tensor_C, core_tensor_G, components_P, S
             j += 1
         i += 1
         j = 0
-    print(optimal)
+    # print(optimal)
     return core_tensor_G_out, components_P_out, ace_results
 
 def optimize_tensor_decomposition(X, Y, full_tensor_C, core_tensor_G, components_P, SNRs=range(1,50), ratios=np.arange(95,99.9, 0.1), accos=False):
@@ -286,6 +290,6 @@ def optimize_tensor_decomposition(X, Y, full_tensor_C, core_tensor_G, components
         accos (bool): Boolean to set whether ACCoS should be used
     """
     core_tensor, components, ace_results = automatic_component_extraction(full_tensor_C, core_tensor_G, components_P, SNRs, ratios)
-    if accos: core_tensor_G, components_P = automatic_correlated_component_selection(X, Y, core_tensor_G, components_P)
+    if accos: core_tensor_G, components_P = automatic_correlated_component_selection(X, Y, core_tensor_G, components_P)  # type: ignore
     return core_tensor, components, ace_results
     
