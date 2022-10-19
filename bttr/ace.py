@@ -115,7 +115,6 @@ def pruning(core_tensor_G, components_P, ratio):
     for n in range(0, N):
         Gm = tl.unfold(core_tensor_G, n)
         gm = tl.sum(tl.abs(Gm), 1)
-        test = [((1 - gm[k] / tl.sum(gm)) * 100) for k in range(0, Gm.shape[0])]
         ids = [k for k in range(0, Gm.shape[0]) if ((1 - gm[k] / tl.sum(gm)) * 100) > ratio]
         inv_ids = [k for k in range(0, Gm.shape[0]) if k not in ids]
         if len(inv_ids) == 0: raise PrunedAllComponents() # Added to resolve issue when all gets pruned
@@ -126,6 +125,9 @@ def pruning(core_tensor_G, components_P, ratio):
     return core_tensor_G, components_P_out
 
 def update_P(full_tensor_C, core_tensor_G, components_P):
+    r"""
+    Is unnecessary due to components_P already being orthonormal
+    """
     N = len(components_P)
     components_P_out = [None] * N
     for n in range(0, N):
