@@ -274,8 +274,7 @@ def automatic_component_extraction(full_tensor_C, core_tensor_G, components_P, S
             j += 1
         i += 1
         j = 0
-    # print(optimal)
-    return core_tensor_G_out, components_P_out, ace_results
+    return core_tensor_G_out, components_P_out, optimal, ace_results
 
 def optimize_tensor_decomposition(X, Y, full_tensor_C, core_tensor_G, components_P, SNRs=range(1,50), ratios=np.arange(95,99.9, 0.1), accos=False):
     r"""
@@ -291,7 +290,7 @@ def optimize_tensor_decomposition(X, Y, full_tensor_C, core_tensor_G, components
         ratios (float/int list): list of parameters for use in pruning of the components
         accos (bool): Boolean to set whether ACCoS should be used
     """
-    core_tensor, components, ace_results = automatic_component_extraction(full_tensor_C, core_tensor_G, components_P, SNRs, ratios)
+    core_tensor, components, optimal, ace_results = automatic_component_extraction(full_tensor_C, core_tensor_G, components_P, SNRs, ratios)
     if accos: core_tensor_G, components_P = automatic_correlated_component_selection(X, Y, core_tensor_G, components_P)  # type: ignore
-    return core_tensor, components, ace_results
+    return core_tensor, components, optimal, ace_results
     

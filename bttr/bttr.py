@@ -102,6 +102,9 @@ class BTTR:
         for i in range(0, self.nFactor):
             out[i] = Xtest.reshape((Xtest.shape[0], -1), order='F') @ (self.E.model(i+1) @ self.F.model(i+1))
         return out
+    
+    def getModel(self, factor=None):
+        return self.E.model(factor), self.F.model(factor)
 
 class BlockTermTensor:
     r"""
@@ -216,8 +219,8 @@ class Decomposition:
             ratios (float/int list): list of parameters for use in pruning of the components
             useACCoS (bool): Used to select whether or not ACCoS should be used 
         """
-        self.core_tensor_G, self.components, ace_results = optimize_tensor_decomposition(self.X, self.Y, self.full_tensor_C, self.core_tensor_G, self.components, SNRs, ratios, useACCoS)
-        return ace_results
+        self.core_tensor_G, self.components, optimal, ace_results = optimize_tensor_decomposition(self.X, self.Y, self.full_tensor_C, self.core_tensor_G, self.components, SNRs, ratios, useACCoS)
+        return optimal, ace_results
 
     def deflate(self, deflate=(True, True), score_vector_matrix=False):
         r"""

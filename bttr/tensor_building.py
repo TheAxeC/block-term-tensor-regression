@@ -1,6 +1,7 @@
 import pickle
 import time
 
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import sparse
@@ -21,54 +22,10 @@ class DataDoesNotExist(Exception):
     """
     pass
 
-class TensorBuilder:
+class TensorData:
     r"""
         Helper Class to build a Tensor from a time series
     """
-
-    @staticmethod
-    def baseline_als(y, lam, p, niter=10):
-        L = len(y)
-        D = sparse.diags([1,-2,1],[0,-1,-2], shape=(L,L-2))  # type: ignore
-        w = np.ones(L)
-        z = None
-        for i in range(niter):
-            W = sparse.spdiags(w, 0, L, L)
-            Z = W + lam * D.dot(D.transpose())
-            z = spsolve(Z, w*y)
-            w = p * (y > z) + (1-p) * (y < z)
-        return z
-
-    # The second processing technique
-    @staticmethod
-    def process2(finger):
-        new_finger = TensorBuilder.baseline_als(finger, 0.01, 0.07) # lamda set to 1e5 and p set to 0.05(>0.001 and <0.1)
-        
-        # Normalizing the array
-        maxElement = np.amax(new_finger)  # type: ignore
-        new_finger /= maxElement
-        
-        # Threseholding the signal to have no negative value
-        new_finger[new_finger < 0] = 0
-        
-        return new_finger
-
-    @staticmethod
-    def loadTest():
-        length = 1000
-        width = 20
-        height = 80
-        param = 0.1
-        ecogTensor = np.zeros((length, height, width))
-        fingers = np.zeros((length, 1))
-        regions = ['swiss', 'rectangle']
-        for i in range(0, length):
-            item = np.random.choice([0,1])
-            if i < length / 2: item = 0
-            else: item = 1
-            ecogTensor[i] = (1-param) * gen_image(region=regions[item], image_height=height, image_width=width) + param * np.random.rand(height,width)
-            fingers[i] = item
-        tensor = {'X' : ecogTensor, 'Y' : fingers}
 
     @staticmethod
     def loadMat(filename : str):
@@ -87,7 +44,7 @@ class TensorBuilder:
         data = sploadmat(filename, struct_as_record=False)
         for key in data:
             if isinstance(data[key], matlab.mio5_params.mat_struct):
-                data[key] = TensorBuilder._todict(data[key])
+                data[key] = TensorData._todict(data[key])
         return data
 
     @staticmethod
@@ -103,7 +60,7 @@ class TensorBuilder:
         for strg in matobj._fieldnames:
             elem = matobj.__dict__[strg]
             if isinstance(elem, matlab.mio5_params.mat_struct):
-                dictionary[strg] = TensorBuilder._todict(elem)
+                dictionary[strg] = TensorData._todict(elem)
             else:
                 dictionary[strg] = elem
         return dictionary
@@ -155,6 +112,99 @@ class TensorBuilder:
             # everything else, possibly fatal
             # print(traceback.format_exc(e))
             raise DataDoesNotExist()
+
+class TensorAnalysis:
+
+    @staticmethod
+    def statisticalSignificance(x, y):
+        r"""
+        Compute a Wilcoxon signed-rank test
+
+        Args:
+            x (np.ndarray): First set of observations
+            y (np.ndarray): Second set of observations
+        """
+        return wilcoxon(x, y)
+
+    @staticmethod
+    def normalize(data):
+        r"""
+        Normalize data between 0 and 1
+
+        Args:
+            data (np.ndarray): Data to be normalized
+        """
+        return (data - np.min(data)) / (np.max(data) - np.min(data))
+
+    @staticmethod
+    def pearson_correlation(truth, predicted, axis=0):
+        r"""
+        Calculate Pearson's correlation coefficients
+
+        Args:
+            truth (np.ndarray): The tensor containing the ground truth labels
+            predicted (np.ndarray): The tensor containing the predicted labels. Is required to be the same shape as parameter ``truth``
+            axis (int): axis to predict the Pearson's correlation along. Cannot be larger than the dimension of truth/predicted. If this is None, then the overall Pearson's correlation is given
+
+        """
+        if truth.shape != predicted.shape:
+            raise Exception("Size of truth tensor shape " + str(truth.shape) + " does not match the predicted tensor shape " + str(predicted.shape))
+        if len(truth.shape) <= axis:
+            raise Exception("Axis " + str(axis) + " is too large (maximum size: " + str(len(truth.shape)) + ")")
+        if axis is not None:
+            truth = np.rollaxis(truth, axis)
+            predicted = np.rollaxis(predicted, axis)
+            return [pearsonr(truth[i], predicted[i]) for i in range(0, truth.shape[0])]
+        else:
+            return pearsonr(truth[:,0], predicted)
+
+    @staticmethod
+    def trainBTTR(X, Y, X_test, Y_test, nFactor, score_vector_matrix=False, plot=False):
+        start = time.time()
+        bttr = BTTR()
+        bttr.train(X, Y, nFactor=nFactor, score_vector_matrix=score_vector_matrix)
+        end = time.time()
+        timing = end - start
+        out = bttr.predict(X_test)
+        corr = [TensorAnalysis.pearson_correlation(Y_test, pred, axis=1) for pred in out]
+
+        if plot: TensorAnalysis.plotFingers(Y_test, out[TensorAnalysis.findMaxCorr(corr)])
+        for c in corr:
+            print([round(i[0], 4) for i in c])  # type: ignore
+        modelX, modelY = bttr.getModel()
+        plt.figure(figsize=(20,20))
+        plt.imshow(modelX, aspect='auto', interpolation='none', cmap=mpl.colormaps["PiYG"])
+        plt.colorbar()
+        plt.figure(figsize=(20,20))
+        plt.imshow(modelY, aspect='auto', interpolation='none', cmap=mpl.colormaps["PiYG"])
+        plt.colorbar()
+        plt.show()
+        return corr, out, timing
+
+    @staticmethod
+    def findMaxCorr(correlations):
+        max_idx = 0
+        max_elem = None
+        for i in range(0, len(correlations)):
+            elem = sum(i for i, j in correlations[i])
+            if max_elem is None or elem > max_elem:
+                max_elem = elem
+                max_idx = i
+        return max_idx
+
+    @staticmethod
+    def plotFingers(truth, predicted):
+        plt.plot(TensorAnalysis.normalize(predicted), label='Predicted')
+        plt.plot(TensorAnalysis.normalize(truth), label='True')
+        plt.legend()
+        plt.show()
+
+
+
+class TensorBuilder:
+    r"""
+        Helper Class to build a Tensor from a time series
+    """
 
     @staticmethod
     def commonAverageReference(data):
@@ -293,77 +343,3 @@ class TensorBuilder:
         for i in range(0, data.shape[1]):
             out[:, i] =  zscore(data[:,i])
         return out
-
-    @staticmethod
-    def statisticalSignificance(x, y):
-        r"""
-        Compute a Wilcoxon signed-rank test
-
-        Args:
-            x (np.ndarray): First set of observations
-            y (np.ndarray): Second set of observations
-        """
-        return wilcoxon(x, y)
-
-    @staticmethod
-    def normalize(data):
-        r"""
-        Normalize data between 0 and 1
-
-        Args:
-            data (np.ndarray): Data to be normalized
-        """
-        return (data - np.min(data)) / (np.max(data) - np.min(data))
-
-    @staticmethod
-    def pearson_correlation(truth, predicted, axis=0):
-        r"""
-        Calculate Pearson's correlation coefficients
-
-        Args:
-            truth (np.ndarray): The tensor containing the ground truth labels
-            predicted (np.ndarray): The tensor containing the predicted labels. Is required to be the same shape as parameter ``truth``
-            axis (int): axis to predict the Pearson's correlation along. Cannot be larger than the dimension of truth/predicted. If this is None, then the overall Pearson's correlation is given
-
-        """
-        if truth.shape != predicted.shape:
-            raise Exception("Size of truth tensor shape " + str(truth.shape) + " does not match the predicted tensor shape " + str(predicted.shape))
-        if len(truth.shape) <= axis:
-            raise Exception("Axis " + str(axis) + " is too large (maximum size: " + str(len(truth.shape)) + ")")
-        if axis is not None:
-            truth = np.rollaxis(truth, axis)
-            predicted = np.rollaxis(predicted, axis)
-            return [pearsonr(truth[i], predicted[i]) for i in range(0, truth.shape[0])]
-        else:
-            return pearsonr(truth[:,0], predicted)
-
-    @staticmethod
-    def trainBTTR(X, Y, X_test, Y_test, nFactor, score_vector_matrix=False, plot=False):
-        start = time.time()
-        bttr = BTTR()
-        bttr.train(X, Y, nFactor=nFactor, score_vector_matrix=score_vector_matrix)
-        end = time.time()
-        timing = end - start
-        out = bttr.predict(X_test)
-        corr = [TensorBuilder.pearson_correlation(Y_test, pred, axis=1) for pred in out]
-
-        if plot: TensorBuilder.plotFingers(Y_test, out[TensorBuilder.findMaxCorr(corr)])
-        return corr, out, timing
-
-    @staticmethod
-    def findMaxCorr(correlations):
-        max_idx = 0
-        max_elem = None
-        for i in range(0, len(correlations)):
-            elem = sum(i for i, j in correlations[i])
-            if max_elem is None or elem > max_elem:
-                max_elem = elem
-                max_idx = i
-        return max_idx
-
-    @staticmethod
-    def plotFingers(truth, predicted):
-        plt.plot(TensorBuilder.normalize(predicted), label='Predicted')
-        plt.plot(TensorBuilder.normalize(truth), label='True')
-        plt.legend()
-        plt.show()
